@@ -481,9 +481,9 @@ async function loadKokoro() {
 
     // Speak a short test sentence before reading. This catches GPUs that load the
     // model and then hang, and fetches the voice file up front.
-    const warmUp = async (m, ms) => {
+    const warmUp = async (m, ms, label) => {
       const t = performance.now();
-      const tick = () => setStatus(`Testing the voice... ${Math.round((performance.now() - t) / 1000)}s`);
+      const tick = () => setStatus(`Testing the voice (${label}, up to ${ms / 1000}s)... ${Math.round((performance.now() - t) / 1000)}s`);
       tick();
       const iv = setInterval(tick, 1000);
       try {
@@ -501,7 +501,7 @@ async function loadKokoro() {
         if (adapter) {
           setStatus("Loading model on GPU...");
           const m = await tryLoad("webgpu", "fp32");
-          await warmUp(m, 30000);
+          await warmUp(m, 30000, "GPU");
           model = m;
         }
       } catch (e) { console.warn("GPU voice unavailable, using CPU", e); }
@@ -509,7 +509,7 @@ async function loadKokoro() {
     if (!model) {
       setStatus("Loading model (CPU mode)...");
       model = await tryLoad("wasm", "q8");
-      await warmUp(model, 90000);
+      await warmUp(model, 90000, "CPU");
     }
     tts = model;
     setBar(0);
