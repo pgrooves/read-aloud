@@ -137,10 +137,11 @@ let runId = 0;            // increments to cancel a playback run
 let mode = "idle";        // idle | playing | paused
 let tts = null, ttsLoading = null, genLock = Promise.resolve();
 let speedRatio = 0;        // generation time / audio length, measured by the warm-up
+let slowOk = false;        // user chose Kokoro again after a too-slow warning
+const SLOW_RATIO = 3;      // slower than this and playback would mostly be pauses
 let currentSrc = null;
 const player = new Audio();
 player.preload = "auto";
-const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 // 0.1s of silence, played inside the tap to unlock audio on iPhone
 const SILENT_WAV = URL.createObjectURL(new Blob([wavBytes([new Int16Array(2400)], 24000, 0)], { type: "audio/wav" }));
 function unlockAudio() { if (!player.src) { player.src = SILENT_WAV; player.play().catch(() => {}); } }
@@ -487,21 +488,21 @@ async function loadKokoro() {
       tick();
       const iv = setInterval(tick, 1000);
       try {
-        const a = await withTimeout(m.generate("Ready to read.", { voice: ui.voice.value }), ms, "the voice test took too long");
+        const a = await withTimeout(m.generate("Ready to read.", { voice: ui.voice.value }), ms, "this device is too slow to run the AI voice");
         speedRatio = (performance.now() - t) / 1000 / (a.audio.length / a.sampling_rate);
       } catch (e) { m.terminate(); throw e; }
       finally { clearInterval(iv); }
     };
 
     let model = null;
-    if (navigator.gpu && !IS_IOS) {
+    if (navigator.gpu) { // includes iPhone/iPad on iOS 26+
       setStatus("Checking for GPU acceleration...");
       try {
         const adapter = await withTimeout(navigator.gpu.requestAdapter(), 4000, "GPU check timed out");
         if (adapter) {
           setStatus("Loading model on GPU...");
           const m = await tryLoad("webgpu", "fp32");
-          await warmUp(m, 30000, "GPU");
+          await warmUp(m, 45000, "GPU");
           model = m;
         }
       } catch (e) { console.warn("GPU voice unavailable, using CPU", e); }
@@ -509,7 +510,7 @@ async function loadKokoro() {
     if (!model) {
       setStatus("Loading model (CPU mode)...");
       model = await tryLoad("wasm", "q8");
-      await warmUp(model, 90000, "CPU");
+      await warmUp(model, 45000, "CPU");
     }
     tts = model;
     setBar(0);
@@ -541,6 +542,14 @@ async function runKokoro(start, run) {
     return;
   }
   if (run !== runId) return;
+  if (speedRatio > SLOW_RATIO && !slowOk) {
+    slowOk = true; // if they pick Kokoro again by hand, let it run
+    setMode("idle");
+    ui.engine.value = "browser";
+    fillVoices();
+    return setStatus(`Kokoro AI runs about ${Math.round(speedRatio)}x slower than real time on this device, so it would keep pausing. ` +
+      "Switched to built-in voices; press Play. (You can still pick Kokoro under Engine.)");
+  }
 
   const ready = new Map();
   let wake = null;
