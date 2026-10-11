@@ -139,6 +139,17 @@ let tts = null, ttsLoading = null, genLock = Promise.resolve();
 let speedRatio = 0;        // generation time / audio length, measured by the warm-up
 let slowOk = false;        // user chose Kokoro again after a too-slow warning
 const SLOW_RATIO = 3;      // slower than this and playback would mostly be pauses
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
+// localStorage can be missing or throw (private mode, blocked storage), so never rely on it
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} },
+};
+// If the tab was killed while loading the voice (iPhones do this when memory runs out),
+// the "loading" marker is still set: remember that and don't try that way again.
+const crashedDuring = store.get("ra-loading");
+if (crashedDuring) { store.set("ra-loading", null); store.set("ra-crashed-" + crashedDuring, "1"); }
 let currentSrc = null;
 const player = new Audio();
 player.preload = "auto";
@@ -157,8 +168,8 @@ function updateCount() {
   const words = t ? t.split(/\s+/).length : 0;
   ui.count.textContent = words ? `${words.toLocaleString()} words, about ${Math.max(1, Math.round(words / 160))} min` : "";
 }
-ui.input.addEventListener("input", updateCount);
-ui.clear.onclick = () => { stopAll(); ui.input.value = ""; ui.reader.innerHTML = ""; builtFrom = null; updateCount(); };
+ui.input.addEventListener("input", () => { updateCount(); store.set("ra-text", ui.input.value); });
+ui.clear.onclick = () => { stopAll(); ui.input.value = ""; ui.reader.innerHTML = ""; builtFrom = null; updateCount(); store.set("ra-text", null); store.set("ra-pos", null); };
 
 ui.file.onchange = () => { if (ui.file.files[0]) loadFile(ui.file.files[0]); ui.file.value = ""; };
 ["dragenter", "dragover"].forEach((e) => ui.input.addEventListener(e, (ev) => { ev.preventDefault(); ui.input.classList.add("drag"); }));
@@ -175,6 +186,7 @@ async function loadFile(f) {
     else if (/\.(md|markdown)$/.test(name)) text = mdToText(await f.text());
     else text = await f.text();
     ui.input.value = text.trim();
+    store.set("ra-text", ui.input.value);
     updateCount();
     buildReader();
     setStatus(`Loaded ${f.name}. Press Play.`);
@@ -291,6 +303,7 @@ function highlight(i) {
     if (r.top < box.top || r.bottom > box.bottom) cur.scrollIntoView({ block: "center", behavior: "smooth" });
   }
   setBar(chunks.length ? i / chunks.length : 0);
+  store.set("ra-pos", String(Math.max(0, i)));
 }
 
 /* ---------- controls ---------- */
@@ -308,7 +321,10 @@ function fillVoices() {
 if ("speechSynthesis" in window) speechSynthesis.onvoiceschanged = () => { if (ui.engine.value === "browser") fillVoices(); };
 fillVoices();
 
-ui.engine.onchange = () => { const wasActive = mode !== "idle"; stopAll(); fillVoices(); if (wasActive) startFrom(idx); };
+ui.engine.onchange = () => {
+  if (ui.engine.value === "kokoro") store.set("ra-crashed-wasm", null); // picking it by hand means: try again
+  const wasActive = mode !== "idle"; stopAll(); fillVoices(); if (wasActive) startFrom(idx);
+};
 ui.voice.onchange = () => { if (mode === "playing") startFrom(idx); };
 ui.speed.oninput = () => { ui.speedval.textContent = (+ui.speed.value).toFixed(1) + "x"; };
 ui.speed.onchange = () => { if (mode === "playing") startFrom(idx); };
@@ -490,27 +506,44 @@ async function loadKokoro() {
       try {
         const a = await withTimeout(m.generate("Ready to read.", { voice: ui.voice.value }), ms, "this device is too slow to run the AI voice");
         speedRatio = (performance.now() - t) / 1000 / (a.audio.length / a.sampling_rate);
+        let peak = 0;
+        for (const v of a.audio) { if (!Number.isFinite(v)) { peak = 0; break; } peak = Math.max(peak, Math.abs(v)); }
+        if (peak < 0.01) throw new Error("the voice test produced no usable sound");
       } catch (e) { m.terminate(); throw e; }
       finally { clearInterval(iv); }
     };
 
+    // Marks the attempt so a crash (tab killed for memory) is detected on the next load
+    const guarded = async (device, fn) => {
+      store.set("ra-loading", device);
+      try { return await fn(); } finally { store.set("ra-loading", null); }
+    };
+
     let model = null;
-    if (navigator.gpu) { // includes iPhone/iPad on iOS 26+
+    if (navigator.gpu && !store.get("ra-crashed-webgpu")) { // includes iPhone/iPad on iOS 26+
       setStatus("Checking for GPU acceleration...");
       try {
         const adapter = await withTimeout(navigator.gpu.requestAdapter(), 4000, "GPU check timed out");
-        if (adapter) {
+        // The full-size GPU model (326 MB) runs iPhones out of memory; use the half-size one there
+        const dtype = !IS_IOS ? "fp32" : adapter && adapter.features.has("shader-f16") ? "fp16" : null;
+        if (adapter && dtype) {
           setStatus("Loading model on GPU...");
-          const m = await tryLoad("webgpu", "fp32");
-          await warmUp(m, 45000, "GPU");
-          model = m;
+          model = await guarded("webgpu", async () => {
+            const m = await tryLoad("webgpu", dtype);
+            await warmUp(m, 45000, "GPU");
+            return m;
+          });
         }
       } catch (e) { console.warn("GPU voice unavailable, using CPU", e); }
     }
     if (!model) {
+      if (store.get("ra-crashed-wasm")) throw new Error("it crashed this page last time (the device ran out of memory)");
       setStatus("Loading model (CPU mode)...");
-      model = await tryLoad("wasm", "q8");
-      await warmUp(model, 45000, "CPU");
+      model = await guarded("wasm", async () => {
+        const m = await tryLoad("wasm", "q8");
+        await warmUp(m, 45000, "CPU");
+        return m;
+      });
     }
     tts = model;
     setBar(0);
@@ -626,6 +659,7 @@ if ("mediaSession" in navigator) {
 
 function finish() {
   setMode("idle"); idx = 0; setBar(1);
+  store.set("ra-pos", null);
   setStatus("Finished.");
 }
 
@@ -670,7 +704,21 @@ function downloadWav() {
   if (missing > 0) setStatus(`Saved ${keys.length} of ${chunks.length} sections (only what's been generated so far).`);
 }
 
+const savedText = store.get("ra-text");
+if (savedText) {
+  ui.input.value = savedText;
+  buildReader();
+  const pos = +store.get("ra-pos") || 0;
+  if (pos > 0 && pos < chunks.length) { idx = pos; highlight(pos); }
+}
 updateCount();
+if (crashedDuring === "webgpu") {
+  setStatus("Last time the AI voice ran this device out of memory on the GPU and the page reloaded. It will use CPU mode now (slower).");
+} else if (crashedDuring === "wasm" || store.get("ra-crashed-wasm")) {
+  ui.engine.value = "browser";
+  fillVoices();
+  setStatus("The AI voice ran this device out of memory, so the page is using built-in voices.");
+}
 </script>
 </body>
 </html>
