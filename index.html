@@ -312,12 +312,24 @@ function fillVoices() {
   if (ui.engine.value === "kokoro") {
     for (const [id, label] of KOKORO_VOICES) ui.voice.add(new Option(label, id));
   } else {
-    const vs = speechSynthesis.getVoices();
-    const sorted = [...vs].sort((a, b) => (b.lang.startsWith("en") - a.lang.startsWith("en")) || a.name.localeCompare(b.name));
-    sorted.forEach((v) => ui.voice.add(new Option(`${v.name} (${v.lang})`, v.name)));
-    if (!vs.length) ui.voice.add(new Option("Loading voices...", ""));
+    const vs = "speechSynthesis" in window ? speechSynthesis.getVoices() : [];
+    const lang = (navigator.language || "en-US").toLowerCase();
+    // Best first: your language, then Premium/Enhanced voices, then the rest; joke voices last
+    const rank = (v) => {
+      const id = (v.voiceURI + " " + v.name).toLowerCase();
+      return (v.lang.toLowerCase() === lang ? 0 : v.lang.toLowerCase().startsWith("en") ? 10 : 20) +
+        (/premium/.test(id) ? 0 : /enhanced/.test(id) ? 1 : /compact|eloquence/.test(id) ? 3 : /speech\.synthesis\.voice/.test(id) ? 4 : 2);
+    };
+    [...vs].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
+      .forEach((v) => ui.voice.add(new Option(`${v.name} (${v.lang})`, v.voiceURI)));
+    if (!vs.length) {
+      ui.voice.add(new Option("Default voice", ""));
+      // iPhones often never fire "voiceschanged", so keep checking for a few seconds
+      if (voiceTries++ < 20) setTimeout(() => { if (ui.engine.value === "browser" && !ui.voice.value) fillVoices(); }, 300);
+    }
   }
 }
+let voiceTries = 0;
 if ("speechSynthesis" in window) speechSynthesis.onvoiceschanged = () => { if (ui.engine.value === "browser") fillVoices(); };
 fillVoices();
 
@@ -378,7 +390,7 @@ function startFrom(i) {
 /* ---------- browser voices engine ---------- */
 async function runBrowser(start, run) {
   if (!("speechSynthesis" in window)) return setStatus("This browser has no built-in speech.");
-  const v = speechSynthesis.getVoices().find((x) => x.name === ui.voice.value);
+  const v = speechSynthesis.getVoices().find((x) => x.voiceURI === ui.voice.value);
   setStatus("Reading with browser voice...");
   for (let i = start; i < chunks.length; i++) {
     if (run !== runId) return;
@@ -530,6 +542,8 @@ async function loadKokoro() {
           setStatus("Loading model on GPU...");
           model = await guarded("webgpu", async () => {
             const m = await tryLoad("webgpu", dtype);
+            // The GPU's first run sets itself up (slow on phones); the second shows the real speed
+            await warmUp(m, IS_IOS ? 150000 : 45000, "GPU, first-time setup");
             await warmUp(m, 45000, "GPU");
             return m;
           });
@@ -538,6 +552,7 @@ async function loadKokoro() {
     }
     if (!model) {
       if (store.get("ra-crashed-wasm")) throw new Error("it crashed this page last time (the device ran out of memory)");
+      if (IS_IOS) throw new Error("this iPhone couldn't run it on the GPU, and its CPU is too slow for it");
       setStatus("Loading model (CPU mode)...");
       model = await guarded("wasm", async () => {
         const m = await tryLoad("wasm", "q8");
@@ -712,7 +727,11 @@ if (savedText) {
   if (pos > 0 && pos < chunks.length) { idx = pos; highlight(pos); }
 }
 updateCount();
-if (crashedDuring === "webgpu") {
+if (crashedDuring === "webgpu" && IS_IOS) {
+  ui.engine.value = "browser";
+  fillVoices();
+  setStatus("The AI voice ran this iPhone out of memory and the page reloaded, so it's using built-in voices.");
+} else if (crashedDuring === "webgpu") {
   setStatus("Last time the AI voice ran this device out of memory on the GPU and the page reloaded. It will use CPU mode now (slower).");
 } else if (crashedDuring === "wasm" || store.get("ra-crashed-wasm")) {
   ui.engine.value = "browser";
