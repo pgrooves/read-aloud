@@ -115,6 +115,7 @@ const KOKORO_VOICES = [
   ["bm_fable", "Fable (UK male)"],
 ];
 const AHEAD = 3; // chunks to pre-generate ahead of playback
+const GEN_TIMEOUT = 120000; // give up on a single chunk after this long
 
 const $ = (s) => document.querySelector(s);
 const ui = {
@@ -135,6 +136,7 @@ let idx = 0;              // current chunk
 let runId = 0;            // increments to cancel a playback run
 let mode = "idle";        // idle | playing | paused
 let tts = null, ttsLoading = null, genLock = Promise.resolve();
+let speedRatio = 0;        // generation time / audio length, measured by the warm-up
 let currentSrc = null;
 const player = new Audio();
 player.preload = "auto";
@@ -226,7 +228,7 @@ function mdToText(md) {
 
 /* ---------- chunking ---------- */
 function splitText(text) {
-  const MAX = 280, MIN = 80;
+  const MAX = 200, MIN = 40;
   const out = [];
   const paras = text.replace(/\r/g, "").split(/\n\s*\n/).map((p) => p.replace(/\s+/g, " ").trim()).filter(Boolean);
   paras.forEach((para, pi) => {
@@ -431,15 +433,33 @@ async function loadKokoro() {
       return Promise.race([load, watchdog]);
     };
 
+    // Speak a short test sentence before reading. This catches GPUs that load the
+    // model and then hang, and fetches the voice file up front.
+    const warmUp = async (m, ms) => {
+      setStatus("Testing the voice...");
+      const t = performance.now();
+      const a = await withTimeout(m.generate("Ready to read.", { voice: ui.voice.value }), ms, "the voice test took too long");
+      speedRatio = (performance.now() - t) / 1000 / (a.audio.length / a.sampling_rate);
+    };
+
     let model = null;
     if (navigator.gpu && !IS_IOS) {
       setStatus("Checking for GPU acceleration...");
       try {
         const adapter = await withTimeout(navigator.gpu.requestAdapter(), 4000, "GPU check timed out");
-        if (adapter) { setStatus("Loading model on GPU..."); model = await tryLoad("webgpu", "fp32"); }
-      } catch (e) { console.warn("WebGPU unavailable, using CPU", e); }
+        if (adapter) {
+          setStatus("Loading model on GPU...");
+          const m = await tryLoad("webgpu", "fp32");
+          await warmUp(m, 30000);
+          model = m;
+        }
+      } catch (e) { console.warn("GPU voice unavailable, using CPU", e); }
     }
-    if (!model) { setStatus("Loading model (CPU mode)..."); model = await tryLoad("wasm", "q8"); }
+    if (!model) {
+      setStatus("Loading model (CPU mode)...");
+      model = await tryLoad("wasm", "q8");
+      await warmUp(model, 90000);
+    }
     tts = model;
     setBar(0);
     return model;
@@ -450,7 +470,8 @@ async function loadKokoro() {
 
 function generate(i) {
   const voice = ui.voice.value, speed = +ui.speed.value, text = chunks[i].text;
-  const job = genLock.then(() => tts.generate(text, { voice, speed }));
+  const job = genLock.then(() => withTimeout(tts.generate(text, { voice, speed }), GEN_TIMEOUT,
+    "the voice model stopped responding"));
   genLock = job.catch(() => {});
   return job;
 }
@@ -495,12 +516,25 @@ async function runKokoro(start, run) {
   for (let i = start; i < chunks.length; i++) {
     if (run !== runId) return;
     idx = i;
+    const waitStart = Date.now();
+    const label = i === start ? "Generating speech" : speedRatio > 1
+      ? "Buffering (this device makes speech slower than it plays)" : "Buffering";
     while (!ready.has(i) && !failed && run === runId) {
-      if (mode === "playing") setStatus(i === start ? "Generating speech..." : "Buffering...");
+      const tick = () => { if (mode === "playing" && run === runId) setStatus(`${label}... ${Math.round((Date.now() - waitStart) / 1000)}s`); };
+      tick();
+      const iv = setInterval(tick, 1000);
       await new Promise((r) => (wake = r));
+      clearInterval(iv);
     }
     if (run !== runId) return;
-    if (failed) { setMode("idle"); return setStatus("Speech generation failed: " + (failed.message || failed)); }
+    if (failed) {
+      console.error(failed);
+      setMode("idle");
+      tts = null; ttsLoading = null; genLock = Promise.resolve();
+      ui.engine.value = "browser";
+      fillVoices();
+      return setStatus("Kokoro AI failed: " + (failed.message || failed) + ". Switched to browser voices; press Play to continue from here.");
+    }
     const a = ready.get(i); ready.delete(i);
     highlight(i);
     if (mode === "playing") setStatus(`Reading ${i + 1} of ${chunks.length}`);
