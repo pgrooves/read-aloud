@@ -384,6 +384,54 @@ function withTimeout(promise, ms, msg) {
     .finally(() => clearTimeout(t));
 }
 
+// Kokoro runs in a background worker so generating speech never freezes the page,
+// and a stuck GPU or CPU run can be killed outright.
+const WORKER_SRC = `
+let tts;
+self.onmessage = async ({ data }) => {
+  const { id, type } = data;
+  try {
+    if (type === "load") {
+      let lib;
+      try { lib = await import(data.url); }
+      catch (e) { throw new Error("the Kokoro library didn't download. A content blocker or network filter may be stopping cdn.jsdelivr.net"); }
+      tts = await lib.KokoroTTS.from_pretrained(data.model, {
+        device: data.device, dtype: data.dtype,
+        progress_callback: (p) => self.postMessage({ type: "progress", p: { status: p.status, file: p.file, loaded: p.loaded, total: p.total } }),
+      });
+      self.postMessage({ id, ok: true });
+    } else if (type === "generate") {
+      const a = await tts.generate(data.text, { voice: data.voice, speed: data.speed });
+      self.postMessage({ id, ok: true, audio: a.audio, rate: a.sampling_rate });
+    }
+  } catch (e) {
+    self.postMessage({ id, ok: false, error: String((e && e.message) || e) });
+  }
+};`;
+const WORKER_URL = URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" }));
+
+function makeEngine(device, dtype, onProgress) {
+  const w = new Worker(WORKER_URL, { type: "module" });
+  const pending = new Map();
+  let n = 0;
+  const failAll = (msg) => { for (const p of pending.values()) p.rej(new Error(msg)); pending.clear(); };
+  w.onmessage = ({ data }) => {
+    if (data.type === "progress") return onProgress(data.p);
+    const p = pending.get(data.id);
+    if (!p) return;
+    pending.delete(data.id);
+    data.ok ? p.res(data) : p.rej(new Error(data.error));
+  };
+  w.onerror = (e) => failAll(e.message || "the voice worker crashed");
+  const call = (msg) => new Promise((res, rej) => { const id = ++n; pending.set(id, { res, rej }); w.postMessage({ ...msg, id }); });
+  return {
+    load: () => call({ type: "load", url: KOKORO_URL, model: MODEL_ID, device, dtype }),
+    generate: (text, { voice, speed }) => call({ type: "generate", text, voice, speed })
+      .then((d) => ({ audio: d.audio, sampling_rate: d.rate })),
+    terminate: () => { w.terminate(); failAll("stopped"); },
+  };
+}
+
 const BLOCKED_MSG = "this page can't reach the internet from where it's open. " +
   "If you're viewing it inside the Claude app's preview, download the file and open it directly in Chrome, Edge or Safari";
 
@@ -400,12 +448,7 @@ async function loadKokoro() {
       throw new Error(BLOCKED_MSG + " (model host unreachable: " + (e.message || e) + ")");
     }
 
-    // 2. Library (about 2 MB)
-    setStatus("Downloading Kokoro library (2 MB)...");
-    const { KokoroTTS } = await withTimeout(import(KOKORO_URL), 60000,
-      "the Kokoro library didn't finish downloading in 60 seconds. A content blocker or network filter may be stopping cdn.jsdelivr.net");
-
-    // 3. Model weights (cached by the browser after the first time)
+    // 2. Library (about 2 MB) and model weights (cached by the browser after the first time)
     const files = {};
     let lastActivity = Date.now();
     const progress_callback = (p) => {
@@ -420,9 +463,11 @@ async function loadKokoro() {
         setStatus("Starting voice model...");
       }
     };
-    const tryLoad = (device, dtype) => {
+    const tryLoad = async (device, dtype) => {
+      setStatus("Downloading Kokoro library (2 MB)...");
       lastActivity = Date.now();
-      const load = KokoroTTS.from_pretrained(MODEL_ID, { device, dtype, progress_callback });
+      const engine = makeEngine(device, dtype, progress_callback);
+      const load = engine.load();
       // Fail if nothing happens for 90s (stalled download), not just if it's slow
       const watchdog = new Promise((_, rej) => {
         const iv = setInterval(() => {
@@ -430,16 +475,22 @@ async function loadKokoro() {
         }, 2000);
         load.finally(() => clearInterval(iv)).catch(() => {});
       });
-      return Promise.race([load, watchdog]);
+      try { await Promise.race([load, watchdog]); return engine; }
+      catch (e) { engine.terminate(); throw e; }
     };
 
     // Speak a short test sentence before reading. This catches GPUs that load the
     // model and then hang, and fetches the voice file up front.
     const warmUp = async (m, ms) => {
-      setStatus("Testing the voice...");
       const t = performance.now();
-      const a = await withTimeout(m.generate("Ready to read.", { voice: ui.voice.value }), ms, "the voice test took too long");
-      speedRatio = (performance.now() - t) / 1000 / (a.audio.length / a.sampling_rate);
+      const tick = () => setStatus(`Testing the voice... ${Math.round((performance.now() - t) / 1000)}s`);
+      tick();
+      const iv = setInterval(tick, 1000);
+      try {
+        const a = await withTimeout(m.generate("Ready to read.", { voice: ui.voice.value }), ms, "the voice test took too long");
+        speedRatio = (performance.now() - t) / 1000 / (a.audio.length / a.sampling_rate);
+      } catch (e) { m.terminate(); throw e; }
+      finally { clearInterval(iv); }
     };
 
     let model = null;
@@ -530,6 +581,7 @@ async function runKokoro(start, run) {
     if (failed) {
       console.error(failed);
       setMode("idle");
+      if (tts) tts.terminate();
       tts = null; ttsLoading = null; genLock = Promise.resolve();
       ui.engine.value = "browser";
       fillVoices();
