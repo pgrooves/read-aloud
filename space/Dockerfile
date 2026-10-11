@@ -1,6 +1,6 @@
 FROM node:22-slim
 
-# Hugging Face Spaces run the container as user 1000
+# Run as the unprivileged "node" user
 USER node
 ENV HOME=/home/node NODE_ENV=production PORT=7860
 WORKDIR /home/node/app
