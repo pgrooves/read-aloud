@@ -1,0 +1,7 @@
+{
+  "name": "read-aloud-tts",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "kokoro-js": "1.2.0" }
+}

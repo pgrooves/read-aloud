@@ -67,7 +67,7 @@
 <body>
 <main>
   <h1>Read Aloud</h1>
-  <p class="sub">Paste text or load a PDF, Markdown, or text file. Kokoro AI runs locally in your browser: free, no key, no length limit.</p>
+  <p class="sub">Paste text or load a PDF, Markdown, or text file. Kokoro AI voice: free, no key, no length limit.</p>
 
   <section class="card">
     <textarea id="input" placeholder="Paste text here, or drop a .pdf / .md / .txt file onto this box"></textarea>
@@ -82,7 +82,8 @@
     <div class="row">
       <label class="field">Engine
         <select id="engine">
-          <option value="kokoro">Kokoro AI (best quality)</option>
+          <option value="server">Kokoro AI (fast, runs on a free server)</option>
+          <option value="kokoro">Kokoro AI (runs on this device)</option>
           <option value="browser">Browser voices (instant, no download)</option>
         </select>
       </label>
@@ -105,6 +106,8 @@
 <script type="module">
 const KOKORO_URL = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.0/dist/kokoro.web.js";
 const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+// Kokoro server (a free Hugging Face Space, code in /space). Empty = on-device only.
+const SERVER_URL = "";
 const KOKORO_VOICES = [
   ["af_heart", "Heart (US female)"], ["af_bella", "Bella (US female)"],
   ["af_nicole", "Nicole (US female, soft)"], ["af_sarah", "Sarah (US female)"],
@@ -309,7 +312,7 @@ function highlight(i) {
 /* ---------- controls ---------- */
 function fillVoices() {
   ui.voice.innerHTML = "";
-  if (ui.engine.value === "kokoro") {
+  if (ui.engine.value !== "browser") {
     for (const [id, label] of KOKORO_VOICES) ui.voice.add(new Option(label, id));
   } else {
     const vs = "speechSynthesis" in window ? speechSynthesis.getVoices() : [];
@@ -365,11 +368,11 @@ function stopAll() {
 }
 
 function pause() {
-  if (ui.engine.value === "kokoro" && currentSrc) { player.pause(); setMode("paused"); setStatus("Paused."); }
+  if (ui.engine.value !== "browser" && currentSrc) { player.pause(); setMode("paused"); setStatus("Paused."); }
   else { const keep = idx; stopAll(); idx = keep; setMode("paused"); setStatus("Paused."); }
 }
 function resume() {
-  if (ui.engine.value === "kokoro" && currentSrc && player.paused) { player.play().catch(() => {}); setMode("playing"); setStatus(`Reading ${idx + 1} of ${chunks.length}`); }
+  if (ui.engine.value !== "browser" && currentSrc && player.paused) { player.play().catch(() => {}); setMode("playing"); setStatus(`Reading ${idx + 1} of ${chunks.length}`); }
   else startFrom(idx);
 }
 
@@ -378,7 +381,7 @@ function startFrom(i) {
   if (!chunks.length) return;
   idx = i;
   // Create/unlock audio inside the user gesture (required on iOS/Safari)
-  if (ui.engine.value === "kokoro") {
+  if (ui.engine.value !== "browser") {
     unlockAudio();
     runKokoro(i, ++runId);
   } else {
@@ -568,16 +571,60 @@ async function loadKokoro() {
   catch (e) { ttsLoading = null; throw e; }
 }
 
-function generate(i) {
+/* ---------- Kokoro on the server ---------- */
+let server = null, serverWaking = null;
+async function loadServer() {
+  if (server) return server;
+  if (serverWaking) return serverWaking;
+  serverWaking = (async () => {
+    // Free Spaces go to sleep when unused; the first request wakes them up
+    const t = Date.now();
+    const tick = () => setStatus(`Connecting to the voice server... ${Math.round((Date.now() - t) / 1000)}s (a minute or two if it was asleep)`);
+    tick();
+    const iv = setInterval(tick, 1000);
+    try {
+      for (;;) {
+        try {
+          const r = await withTimeout(fetch(SERVER_URL + "/health", { cache: "no-store" }), 15000, "timeout");
+          if (r.ok) break;
+        } catch {}
+        if (Date.now() - t > 240000) throw new Error("it didn't respond for 4 minutes");
+        await sleep(3000);
+      }
+    } finally { clearInterval(iv); }
+    server = {
+      async generate(text, { voice, speed }) {
+        const r = await fetch(SERVER_URL + "/tts", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, voice, speed }),
+        });
+        if (!r.ok) throw new Error(`server error ${r.status} ${(await r.text().catch(() => "")).slice(0, 120)}`);
+        const buf = await r.arrayBuffer();
+        const pcm = new Int16Array(buf, 44);
+        const audio = new Float32Array(pcm.length);
+        for (let k = 0; k < pcm.length; k++) audio[k] = pcm[k] / 0x8000;
+        return { audio, sampling_rate: new DataView(buf).getUint32(24, true) };
+      },
+      terminate() {},
+    };
+    return server;
+  })();
+  try { return await serverWaking; } finally { serverWaking = null; }
+}
+
+function generate(i, eng) {
   const voice = ui.voice.value, speed = +ui.speed.value, text = chunks[i].text;
-  const job = genLock.then(() => withTimeout(tts.generate(text, { voice, speed }), GEN_TIMEOUT,
+  const job = genLock.then(() => withTimeout(eng.generate(text, { voice, speed }), GEN_TIMEOUT,
     "the voice model stopped responding"));
   genLock = job.catch(() => {});
   return job;
 }
 
 async function runKokoro(start, run) {
-  try { await loadKokoro(); }
+  const useServer = ui.engine.value === "server";
+  const name = useServer ? "The Kokoro voice server" : "Kokoro AI";
+  let eng;
+  try { eng = useServer ? await loadServer() : await loadKokoro(); }
   catch (e) {
     console.error(e);
     if (run !== runId) return;
@@ -586,11 +633,11 @@ async function runKokoro(start, run) {
     // Fall back to built-in browser voices so reading still works
     ui.engine.value = "browser";
     fillVoices();
-    setStatus("Kokoro AI couldn't load: " + (e.message || e) + ". Switched to browser voices; press Play to listen now.");
+    setStatus(name + " couldn't load: " + (e.message || e) + ". Switched to browser voices; press Play to listen now.");
     return;
   }
   if (run !== runId) return;
-  if (speedRatio > SLOW_RATIO && !slowOk) {
+  if (!useServer && speedRatio > SLOW_RATIO && !slowOk) {
     slowOk = true; // if they pick Kokoro again by hand, let it run
     setMode("idle");
     ui.engine.value = "browser";
@@ -610,7 +657,7 @@ async function runKokoro(start, run) {
       while (run === runId && ready.size >= AHEAD) await sleep(150);
       if (run !== runId) return;
       try {
-        const a = await generate(i);
+        const a = await generate(i, eng);
         if (run !== runId) return;
         ready.set(i, a);
         storePcm(i, a);
@@ -625,7 +672,7 @@ async function runKokoro(start, run) {
     if (run !== runId) return;
     idx = i;
     const waitStart = Date.now();
-    const label = i === start ? "Generating speech" : speedRatio > 1
+    const label = i === start ? "Generating speech" : !useServer && speedRatio > 1
       ? "Buffering (this device makes speech slower than it plays)" : "Buffering";
     while (!ready.has(i) && !failed && run === runId) {
       const tick = () => { if (mode === "playing" && run === runId) setStatus(`${label}... ${Math.round((Date.now() - waitStart) / 1000)}s`); };
@@ -638,11 +685,12 @@ async function runKokoro(start, run) {
     if (failed) {
       console.error(failed);
       setMode("idle");
-      if (tts) tts.terminate();
-      tts = null; ttsLoading = null; genLock = Promise.resolve();
+      if (useServer) server = null;
+      else { if (tts) tts.terminate(); tts = null; ttsLoading = null; }
+      genLock = Promise.resolve();
       ui.engine.value = "browser";
       fillVoices();
-      return setStatus("Kokoro AI failed: " + (failed.message || failed) + ". Switched to browser voices; press Play to continue from here.");
+      return setStatus(name + " failed: " + (failed.message || failed) + ". Switched to browser voices; press Play to continue from here.");
     }
     const a = ready.get(i); ready.delete(i);
     highlight(i);
@@ -719,6 +767,8 @@ function downloadWav() {
   if (missing > 0) setStatus(`Saved ${keys.length} of ${chunks.length} sections (only what's been generated so far).`);
 }
 
+if (!SERVER_URL) ui.engine.querySelector('option[value="server"]').remove();
+fillVoices();
 const savedText = store.get("ra-text");
 if (savedText) {
   ui.input.value = savedText;

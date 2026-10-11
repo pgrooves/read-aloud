@@ -1,0 +1,35 @@
+name: Deploy voice server to Hugging Face
+
+on:
+  push:
+    branches: [main]
+    paths: ["space/**", ".github/workflows/deploy-space.yml"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload space/ to the Hugging Face Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::notice::HF_TOKEN secret is not set yet, skipping deploy"
+            exit 0
+          fi
+          pip install -q huggingface_hub
+          python - <<'EOF'
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          user = api.whoami()["name"]
+          repo = f"{user}/read-aloud-tts"
+          api.create_repo(repo, repo_type="space", space_sdk="docker", exist_ok=True)
+          api.upload_folder(folder_path="space", repo_id=repo, repo_type="space",
+                            ignore_patterns=["node_modules/*", ".gitignore"])
+          host = repo.lower().replace("/", "-").replace("_", "-").replace(".", "-")
+          print(f"Space: https://huggingface.co/spaces/{repo}")
+          print(f"Server URL: https://{host}.hf.space")
+          EOF
