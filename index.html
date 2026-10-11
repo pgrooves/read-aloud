@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Read Aloud</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --text: #1d1d1f; --muted: #6b6b70;
+    --line: #e2e0db; --accent: #2f6fed; --accent-ink: #ffffff;
+    --hl: #fff1b8; --hl-ink: #1d1d1f; --done: #9a9a9f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #141416; --card: #1d1d20; --text: #ececee; --muted: #9a9aa2;
+      --line: #2e2e33; --accent: #5b8cff; --accent-ink: #0b0b0c;
+      --hl: #4a3f12; --hl-ink: #fff6d6; --done: #6d6d74;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: .95rem; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  textarea {
+    width: 100%; min-height: 180px; resize: vertical; padding: 12px;
+    border: 1px dashed var(--line); border-radius: 10px; background: transparent;
+    color: var(--text); font: inherit;
+  }
+  textarea.drag { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .row + .row { margin-top: 12px; }
+  .meta { color: var(--muted); font-size: .85rem; }
+  label.field { display: flex; flex-direction: column; gap: 4px; font-size: .8rem; color: var(--muted); flex: 1 1 160px; }
+  select, input[type=range] { font: inherit; }
+  select {
+    padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--card); color: var(--text);
+  }
+  button {
+    font: inherit; font-weight: 600; padding: 10px 16px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); min-width: 110px; }
+  button:disabled { opacity: .45; cursor: default; }
+  .filebtn { position: relative; overflow: hidden; }
+  .filebtn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .bar { height: 6px; background: var(--line); border-radius: 99px; overflow: hidden; margin-top: 12px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  #status { margin-top: 8px; font-size: .85rem; color: var(--muted); min-height: 1.3em; }
+  #reader { max-height: 55vh; overflow-y: auto; line-height: 1.7; }
+  #reader:empty::before { content: "Your text will appear here. Tap any sentence to start reading from it."; color: var(--muted); }
+  #reader p { margin: 0 0 1em; }
+  #reader span { cursor: pointer; border-radius: 4px; padding: 1px 0; }
+  #reader span.done { color: var(--done); }
+  #reader span.now { background: var(--hl); color: var(--hl-ink); }
+  .speedval { min-width: 3ch; display: inline-block; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Read Aloud</h1>
+  <p class="sub">Paste text or load a PDF, Markdown, or text file. Kokoro AI runs locally in your browser: free, no key, no length limit.</p>
+
+  <section class="card">
+    <textarea id="input" placeholder="Paste text here, or drop a .pdf / .md / .txt file onto this box"></textarea>
+    <div class="row" style="margin-top:10px">
+      <span class="filebtn"><button type="button">Load file</button><input id="file" type="file" accept=".pdf,.md,.markdown,.txt,application/pdf,text/markdown,text/plain"></span>
+      <button id="clear" type="button">Clear</button>
+      <span id="count" class="meta"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="row">
+      <label class="field">Engine
+        <select id="engine">
+          <option value="kokoro">Kokoro AI (best quality)</option>
+          <option value="browser">Browser voices (instant, no download)</option>
+        </select>
+      </label>
+      <label class="field">Voice <select id="voice"></select></label>
+      <label class="field">Speed <span><input id="speed" type="range" min="0.6" max="2" step="0.1" value="1"> <span id="speedval" class="speedval">1.0x</span></span></label>
+    </div>
+    <div class="row">
+      <button id="play" class="primary" type="button">Play</button>
+      <button id="stop" type="button" disabled>Stop</button>
+      <button id="save" type="button" disabled title="Download the AI audio generated so far as a WAV file">Download audio</button>
+    </div>
+    <div class="bar"><div id="bar"></div></div>
+    <div id="status">Ready.</div>
+  </section>
+
+  <section class="card"><div id="reader"></div></section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script type="module">
+const KOKORO_URL = "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.0/dist/kokoro.web.js";
+const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const KOKORO_VOICES = [
+  ["af_heart", "Heart (US female)"], ["af_bella", "Bella (US female)"],
+  ["af_nicole", "Nicole (US female, soft)"], ["af_sarah", "Sarah (US female)"],
+  ["af_kore", "Kore (US female)"], ["af_aoede", "Aoede (US female)"],
+  ["am_michael", "Michael (US male)"], ["am_fenrir", "Fenrir (US male)"],
+  ["am_puck", "Puck (US male)"], ["bf_emma", "Emma (UK female)"],
+  ["bf_isabella", "Isabella (UK female)"], ["bm_george", "George (UK male)"],
+  ["bm_fable", "Fable (UK male)"],
+];
+const AHEAD = 3; // chunks to pre-generate ahead of playback
+
+const $ = (s) => document.querySelector(s);
+const ui = {
+  input: $("#input"), file: $("#file"), clear: $("#clear"), count: $("#count"),
+  engine: $("#engine"), voice: $("#voice"), speed: $("#speed"), speedval: $("#speedval"),
+  play: $("#play"), stop: $("#stop"), save: $("#save"), bar: $("#bar"),
+  status: $("#status"), reader: $("#reader"),
+};
+
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+}
+
+/* ---------- state ---------- */
+let chunks = [];          // [{text, para}]
+let builtFrom = null;     // text the reader was built from
+let idx = 0;              // current chunk
+let runId = 0;            // increments to cancel a playback run
+let mode = "idle";        // idle | playing | paused
+let tts = null, ttsLoading = null, genLock = Promise.resolve();
+let currentSrc = null;
+const player = new Audio();
+player.preload = "auto";
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+// 0.1s of silence, played inside the tap to unlock audio on iPhone
+const SILENT_WAV = URL.createObjectURL(new Blob([wavBytes([new Int16Array(2400)], 24000, 0)], { type: "audio/wav" }));
+function unlockAudio() { if (!player.src) { player.src = SILENT_WAV; player.play().catch(() => {}); } }
+let audioStore = new Map(); // idx -> {pcm:Int16Array, rate}
+
+const setStatus = (t) => (ui.status.textContent = t);
+const setBar = (f) => (ui.bar.style.width = Math.max(0, Math.min(1, f)) * 100 + "%");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* ---------- input handling ---------- */
+function updateCount() {
+  const t = ui.input.value.trim();
+  const words = t ? t.split(/\s+/).length : 0;
+  ui.count.textContent = words ? `${words.toLocaleString()} words, about ${Math.max(1, Math.round(words / 160))} min` : "";
+}
+ui.input.addEventListener("input", updateCount);
+ui.clear.onclick = () => { stopAll(); ui.input.value = ""; ui.reader.innerHTML = ""; builtFrom = null; updateCount(); };
+
+ui.file.onchange = () => { if (ui.file.files[0]) loadFile(ui.file.files[0]); ui.file.value = ""; };
+["dragenter", "dragover"].forEach((e) => ui.input.addEventListener(e, (ev) => { ev.preventDefault(); ui.input.classList.add("drag"); }));
+["dragleave", "drop"].forEach((e) => ui.input.addEventListener(e, (ev) => { ev.preventDefault(); ui.input.classList.remove("drag"); }));
+ui.input.addEventListener("drop", (ev) => { const f = ev.dataTransfer.files[0]; if (f) loadFile(f); });
+
+async function loadFile(f) {
+  stopAll();
+  const name = f.name.toLowerCase();
+  try {
+    setStatus(`Reading ${f.name}...`);
+    let text;
+    if (name.endsWith(".pdf") || f.type === "application/pdf") text = await pdfToText(f);
+    else if (/\.(md|markdown)$/.test(name)) text = mdToText(await f.text());
+    else text = await f.text();
+    ui.input.value = text.trim();
+    updateCount();
+    buildReader();
+    setStatus(`Loaded ${f.name}. Press Play.`);
+  } catch (err) {
+    console.error(err);
+    setStatus(`Couldn't read ${f.name}: ${err.message || err}`);
+  }
+}
+
+async function pdfToText(file) {
+  if (!window.pdfjsLib) throw new Error("PDF reader failed to load (check your connection)");
+  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pages = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    setStatus(`Extracting PDF page ${p} of ${pdf.numPages}...`);
+    setBar(p / pdf.numPages);
+    const content = await (await pdf.getPage(p)).getTextContent();
+    let s = "";
+    for (const it of content.items) {
+      s += it.str;
+      s += it.hasEOL ? "\n" : (it.str.endsWith(" ") ? "" : " ");
+    }
+    pages.push(s);
+  }
+  setBar(0);
+  return pages.join("\n\n")
+    .replace(/(\w)-\n(\w)/g, "$1$2")        // rejoin hyphenated line breaks
+    .replace(/([^\n.!?:])\n(?!\n)/g, "$1 ") // unwrap hard-wrapped lines
+    .replace(/[ \t]+/g, " ");
+}
+
+function mdToText(md) {
+  return md
+    .replace(/^---\n[\s\S]*?\n---\n/, "")             // front matter
+    .replace(/```[\s\S]*?```/g, "")                  // code blocks
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")            // images
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")         // links
+    .replace(/<[^>]+>/g, "")                         // html tags
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+(.*)$/gm, "$1.") // headings become sentences
+    .replace(/^[ \t]*>[ \t]?/gm, "")                 // blockquotes
+    .replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(.*?)([.!?:;,]?)[ \t]*$/gm,
+             (_, item, p) => "\n" + item + (p || ".") + "\n") // list items become their own sentences
+    .replace(/^[ \t]*\|?[ \t:-]+\|[ \t|:-]*$/gm, "") // table separators
+    .replace(/\|/g, ", ")
+    .replace(/(\*\*|__)(.*?)\1/g, "$2")
+    .replace(/(\*|_)(.*?)\1/g, "$2")
+    .replace(/^\s*([-*_]\s*){3,}$/gm, "")            // horizontal rules
+    .replace(/\.\.$/gm, ".")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+/* ---------- chunking ---------- */
+function splitText(text) {
+  const MAX = 280, MIN = 80;
+  const out = [];
+  const paras = text.replace(/\r/g, "").split(/\n\s*\n/).map((p) => p.replace(/\s+/g, " ").trim()).filter(Boolean);
+  paras.forEach((para, pi) => {
+    const sentences = para.match(/[^.!?…]+(?:[.!?…]+["'”’)\]]*|$)\s*/g) || [para];
+    let buf = "";
+    const push = (s) => { s = s.trim(); if (s) out.push({ text: s, para: pi }); };
+    for (let s of sentences) {
+      while (s.length > MAX) {                       // break very long sentences
+        let cut = s.lastIndexOf(", ", MAX);
+        if (cut < MIN) cut = s.lastIndexOf(" ", MAX);
+        if (cut < MIN) cut = MAX;
+        if (buf) { push(buf); buf = ""; }
+        push(s.slice(0, cut + 1)); s = s.slice(cut + 1);
+      }
+      if ((buf + s).length > MAX && buf) { push(buf); buf = ""; }
+      buf += s;
+      if (buf.length >= MIN) { push(buf); buf = ""; }
+    }
+    push(buf);
+  });
+  return out;
+}
+
+function buildReader() {
+  const text = ui.input.value.trim();
+  if (text === builtFrom) return;
+  stopAll();
+  chunks = splitText(text);
+  builtFrom = text;
+  idx = 0;
+  audioStore = new Map();
+  ui.save.disabled = true;
+  ui.reader.innerHTML = "";
+  let p = null, lastPara = -1;
+  chunks.forEach((c, i) => {
+    if (c.para !== lastPara) { p = document.createElement("p"); ui.reader.appendChild(p); lastPara = c.para; }
+    const span = document.createElement("span");
+    span.textContent = c.text + " ";
+    span.dataset.i = i;
+    p.appendChild(span);
+  });
+}
+
+ui.reader.addEventListener("click", (e) => {
+  const i = e.target.dataset?.i;
+  if (i === undefined) return;
+  startFrom(+i);
+});
+
+function highlight(i) {
+  ui.reader.querySelectorAll("span").forEach((s) => {
+    const n = +s.dataset.i;
+    s.classList.toggle("now", n === i);
+    s.classList.toggle("done", n < i);
+  });
+  const cur = ui.reader.querySelector(`span[data-i="${i}"]`);
+  if (cur) {
+    const r = cur.getBoundingClientRect(), box = ui.reader.getBoundingClientRect();
+    if (r.top < box.top || r.bottom > box.bottom) cur.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+  setBar(chunks.length ? i / chunks.length : 0);
+}
+
+/* ---------- controls ---------- */
+function fillVoices() {
+  ui.voice.innerHTML = "";
+  if (ui.engine.value === "kokoro") {
+    for (const [id, label] of KOKORO_VOICES) ui.voice.add(new Option(label, id));
+  } else {
+    const vs = speechSynthesis.getVoices();
+    const sorted = [...vs].sort((a, b) => (b.lang.startsWith("en") - a.lang.startsWith("en")) || a.name.localeCompare(b.name));
+    sorted.forEach((v) => ui.voice.add(new Option(`${v.name} (${v.lang})`, v.name)));
+    if (!vs.length) ui.voice.add(new Option("Loading voices...", ""));
+  }
+}
+if ("speechSynthesis" in window) speechSynthesis.onvoiceschanged = () => { if (ui.engine.value === "browser") fillVoices(); };
+fillVoices();
+
+ui.engine.onchange = () => { const wasActive = mode !== "idle"; stopAll(); fillVoices(); if (wasActive) startFrom(idx); };
+ui.voice.onchange = () => { if (mode === "playing") startFrom(idx); };
+ui.speed.oninput = () => { ui.speedval.textContent = (+ui.speed.value).toFixed(1) + "x"; };
+ui.speed.onchange = () => { if (mode === "playing") startFrom(idx); };
+
+ui.play.onclick = () => {
+  if (mode === "playing") return pause();
+  if (mode === "paused") return resume();
+  buildReader();
+  if (!chunks.length) return setStatus("Add some text first.");
+  startFrom(idx >= chunks.length ? 0 : idx);
+};
+ui.stop.onclick = () => { stopAll(); idx = 0; highlight(-1); setBar(0); setStatus("Stopped."); };
+ui.save.onclick = downloadWav;
+
+function setMode(m) {
+  mode = m;
+  ui.play.textContent = m === "playing" ? "Pause" : m === "paused" ? "Resume" : "Play";
+  ui.stop.disabled = m === "idle";
+}
+
+function stopAll() {
+  runId++;
+  if (currentSrc) { try { currentSrc.stop(); } catch {} currentSrc = null; }
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
+  setMode("idle");
+}
+
+function pause() {
+  if (ui.engine.value === "kokoro" && currentSrc) { player.pause(); setMode("paused"); setStatus("Paused."); }
+  else { const keep = idx; stopAll(); idx = keep; setMode("paused"); setStatus("Paused."); }
+}
+function resume() {
+  if (ui.engine.value === "kokoro" && currentSrc && player.paused) { player.play().catch(() => {}); setMode("playing"); setStatus(`Reading ${idx + 1} of ${chunks.length}`); }
+  else startFrom(idx);
+}
+
+function startFrom(i) {
+  stopAll();
+  if (!chunks.length) return;
+  idx = i;
+  // Create/unlock audio inside the user gesture (required on iOS/Safari)
+  if (ui.engine.value === "kokoro") {
+    unlockAudio();
+    runKokoro(i, ++runId);
+  } else {
+    runBrowser(i, ++runId);
+  }
+  setMode("playing");
+}
+
+/* ---------- browser voices engine ---------- */
+async function runBrowser(start, run) {
+  if (!("speechSynthesis" in window)) return setStatus("This browser has no built-in speech.");
+  const v = speechSynthesis.getVoices().find((x) => x.name === ui.voice.value);
+  setStatus("Reading with browser voice...");
+  for (let i = start; i < chunks.length; i++) {
+    if (run !== runId) return;
+    idx = i; highlight(i);
+    await new Promise((res) => {
+      const u = new SpeechSynthesisUtterance(chunks[i].text);
+      if (v) u.voice = v;
+      u.rate = +ui.speed.value;
+      u.onend = u.onerror = () => res();
+      speechSynthesis.speak(u);
+    });
+  }
+  if (run === runId) finish();
+}
+
+/* ---------- Kokoro engine ---------- */
+function withTimeout(promise, ms, msg) {
+  let t;
+  return Promise.race([promise, new Promise((_, rej) => (t = setTimeout(() => rej(new Error(msg)), ms)))])
+    .finally(() => clearTimeout(t));
+}
+
+const BLOCKED_MSG = "this page can't reach the internet from where it's open. " +
+  "If you're viewing it inside the Claude app's preview, download the file and open it directly in Chrome, Edge or Safari";
+
+async function loadKokoro() {
+  if (tts) return tts;
+  if (ttsLoading) return ttsLoading;
+  ttsLoading = (async () => {
+    // 1. Preflight: can we reach the model host at all?
+    setStatus("Checking connection to the voice model...");
+    try {
+      const r = await withTimeout(fetch(`https://huggingface.co/${MODEL_ID}/resolve/main/config.json`, { cache: "no-store" }), 12000, "timeout");
+      if (!r.ok) throw new Error("HTTP " + r.status);
+    } catch (e) {
+      throw new Error(BLOCKED_MSG + " (model host unreachable: " + (e.message || e) + ")");
+    }
+
+    // 2. Library (about 2 MB)
+    setStatus("Downloading Kokoro library (2 MB)...");
+    const { KokoroTTS } = await withTimeout(import(KOKORO_URL), 60000,
+      "the Kokoro library didn't finish downloading in 60 seconds. A content blocker or network filter may be stopping cdn.jsdelivr.net");
+
+    // 3. Model weights (cached by the browser after the first time)
+    const files = {};
+    let lastActivity = Date.now();
+    const progress_callback = (p) => {
+      lastActivity = Date.now();
+      if (p.status === "progress" && p.total) {
+        files[p.file] = [p.loaded, p.total];
+        const vals = Object.values(files);
+        const loaded = vals.reduce((a, v) => a + v[0], 0), total = vals.reduce((a, v) => a + v[1], 0);
+        setBar(loaded / total);
+        setStatus(`Downloading voice model (first time only): ${(loaded / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`);
+      } else if (p.status === "done" || p.status === "ready") {
+        setStatus("Starting voice model...");
+      }
+    };
+    const tryLoad = (device, dtype) => {
+      lastActivity = Date.now();
+      const load = KokoroTTS.from_pretrained(MODEL_ID, { device, dtype, progress_callback });
+      // Fail if nothing happens for 90s (stalled download), not just if it's slow
+      const watchdog = new Promise((_, rej) => {
+        const iv = setInterval(() => {
+          if (Date.now() - lastActivity > 90000) { clearInterval(iv); rej(new Error("model download stalled")); }
+        }, 2000);
+        load.finally(() => clearInterval(iv)).catch(() => {});
+      });
+      return Promise.race([load, watchdog]);
+    };
+
+    let model = null;
+    if (navigator.gpu && !IS_IOS) {
+      setStatus("Checking for GPU acceleration...");
+      try {
+        const adapter = await withTimeout(navigator.gpu.requestAdapter(), 4000, "GPU check timed out");
+        if (adapter) { setStatus("Loading model on GPU..."); model = await tryLoad("webgpu", "fp32"); }
+      } catch (e) { console.warn("WebGPU unavailable, using CPU", e); }
+    }
+    if (!model) { setStatus("Loading model (CPU mode)..."); model = await tryLoad("wasm", "q8"); }
+    tts = model;
+    setBar(0);
+    return model;
+  })();
+  try { return await ttsLoading; }
+  catch (e) { ttsLoading = null; throw e; }
+}
+
+function generate(i) {
+  const voice = ui.voice.value, speed = +ui.speed.value, text = chunks[i].text;
+  const job = genLock.then(() => tts.generate(text, { voice, speed }));
+  genLock = job.catch(() => {});
+  return job;
+}
+
+async function runKokoro(start, run) {
+  try { await loadKokoro(); }
+  catch (e) {
+    console.error(e);
+    if (run !== runId) return;
+    setMode("idle");
+    setBar(0);
+    // Fall back to built-in browser voices so reading still works
+    ui.engine.value = "browser";
+    fillVoices();
+    setStatus("Kokoro AI couldn't load: " + (e.message || e) + ". Switched to browser voices; press Play to listen now.");
+    return;
+  }
+  if (run !== runId) return;
+
+  const ready = new Map();
+  let wake = null;
+  const notify = () => { if (wake) { wake(); wake = null; } };
+  let failed = null;
+
+  // Producer: generates audio ahead of playback, one chunk at a time
+  (async () => {
+    for (let i = start; i < chunks.length; i++) {
+      while (run === runId && ready.size >= AHEAD) await sleep(150);
+      if (run !== runId) return;
+      try {
+        const a = await generate(i);
+        if (run !== runId) return;
+        ready.set(i, a);
+        storePcm(i, a);
+      } catch (e) { failed = e; }
+      notify();
+      if (failed) return;
+    }
+  })();
+
+  // Consumer: plays chunks in order
+  for (let i = start; i < chunks.length; i++) {
+    if (run !== runId) return;
+    idx = i;
+    while (!ready.has(i) && !failed && run === runId) {
+      if (mode === "playing") setStatus(i === start ? "Generating speech..." : "Buffering...");
+      await new Promise((r) => (wake = r));
+    }
+    if (run !== runId) return;
+    if (failed) { setMode("idle"); return setStatus("Speech generation failed: " + (failed.message || failed)); }
+    const a = ready.get(i); ready.delete(i);
+    highlight(i);
+    if (mode === "playing") setStatus(`Reading ${i + 1} of ${chunks.length}`);
+    await playPcm(a.audio, a.sampling_rate);
+  }
+  if (run === runId) finish();
+}
+
+// Playback uses one <audio> element (not Web Audio) so it still plays with the
+// iPhone ringer switch on silent, and gets lock-screen controls.
+function playPcm(samples, rate) {
+  return new Promise((res) => {
+    const url = URL.createObjectURL(new Blob([wavBytes([floatToPcm(samples)], rate, 0)], { type: "audio/wav" }));
+    const done = () => { player.onended = player.onerror = null; currentSrc = null; URL.revokeObjectURL(url); res(); };
+    currentSrc = { stop: () => { player.pause(); done(); } };
+    player.onended = player.onerror = done;
+    player.src = url;
+    player.playbackRate = 1;
+    player.play().catch((e) => { console.warn(e); setStatus("Tap Play to start audio."); done(); });
+  });
+}
+
+if ("mediaSession" in navigator) {
+  navigator.mediaSession.metadata = new MediaMetadata({ title: "Read Aloud" });
+  navigator.mediaSession.setActionHandler("play", () => { if (mode === "paused") resume(); });
+  navigator.mediaSession.setActionHandler("pause", () => { if (mode === "playing") pause(); });
+}
+
+function finish() {
+  setMode("idle"); idx = 0; setBar(1);
+  setStatus("Finished.");
+}
+
+/* ---------- WAV export ---------- */
+function floatToPcm(f) {
+  const pcm = new Int16Array(f.length);
+  for (let k = 0; k < f.length; k++) { const s = Math.max(-1, Math.min(1, f[k])); pcm[k] = s < 0 ? s * 0x8000 : s * 0x7fff; }
+  return pcm;
+}
+
+// Build a mono 16-bit WAV from PCM pieces, with `gap` samples of silence after each
+function wavBytes(pieces, rate, gap) {
+  const total = pieces.reduce((n, p) => n + p.length + gap, 0);
+  const buf = new ArrayBuffer(44 + total * 2), v = new DataView(buf);
+  const w = (o, s) => [...s].forEach((c, j) => v.setUint8(o + j, c.charCodeAt(0)));
+  w(0, "RIFF"); v.setUint32(4, 36 + total * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, total * 2, true);
+  const out = new Int16Array(buf, 44);
+  let off = 0;
+  for (const p of pieces) { out.set(p, off); off += p.length + gap; }
+  return buf;
+}
+
+function storePcm(i, a) {
+  audioStore.set(i, { pcm: floatToPcm(a.audio), rate: a.sampling_rate });
+  ui.save.disabled = false;
+}
+
+function downloadWav() {
+  const keys = [...audioStore.keys()].sort((a, b) => a - b);
+  if (!keys.length) return;
+  const rate = audioStore.get(keys[0]).rate;
+  const buf = wavBytes(keys.map((k) => audioStore.get(k).pcm), rate, Math.round(rate * 0.08));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([buf], { type: "audio/wav" }));
+  a.download = "read-aloud.wav";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  const missing = chunks.length - keys.length;
+  if (missing > 0) setStatus(`Saved ${keys.length} of ${chunks.length} sections (only what's been generated so far).`);
+}
+
+updateCount();
+</script>
+</body>
+</html>
