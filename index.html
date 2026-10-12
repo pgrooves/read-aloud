@@ -62,6 +62,10 @@
   #reader span.done { color: var(--done); }
   #reader span.now { background: var(--hl); color: var(--hl-ink); }
   .speedval { min-width: 3ch; display: inline-block; }
+  /* Text-only view for Safari's "Listen to Page" */
+  #listenView { max-width: 680px; margin: 0 auto; padding: 24px 16px 64px; font-size: 1.1rem; line-height: 1.7; }
+  #listenView h1 { font-size: 1.6rem; line-height: 1.3; }
+  #listenBack:not([hidden]) { display: block; max-width: 680px; margin: 16px auto 0; padding: 0 16px; color: var(--accent); }
 </style>
 </head>
 <body>
@@ -74,6 +78,7 @@
     <div class="row" style="margin-top:10px">
       <span class="filebtn"><button type="button">Load file</button><input id="file" type="file" accept=".pdf,.md,.markdown,.txt,application/pdf,text/markdown,text/plain"></span>
       <button id="clear" type="button">Clear</button>
+      <button id="listenBtn" type="button" title="Show only the text, so Safari's Listen to Page can read it with the screen off or in another app">Text-only view</button>
       <span id="count" class="meta"></span>
     </div>
   </section>
@@ -101,6 +106,8 @@
 
   <section class="card"><div id="reader"></div></section>
 </main>
+<a id="listenBack" href="./" hidden>&larr; Back to Read Aloud</a>
+<article id="listenView" hidden></article>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script type="module">
@@ -769,6 +776,29 @@ function downloadWav() {
 
 if (!SERVER_URL) ui.engine.querySelector('option[value="server"]').remove();
 fillVoices();
+// Text-only view: a plain article Safari's "Listen to Page" can read, in the background too
+$("#listenBtn").onclick = () => {
+  if (!ui.input.value.trim()) return setStatus("Add some text first.");
+  stopAll();
+  store.set("ra-text", ui.input.value);
+  location.hash = "listen";
+  location.reload();
+};
+if (location.hash === "#listen") {
+  const paras = (store.get("ra-text") || "").replace(/\r/g, "").split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  const view = $("#listenView");
+  // Use a short first paragraph as the title, as an article would have
+  const title = paras.length > 1 && paras[0].length <= 100 ? paras.shift() : "Read Aloud";
+  const h1 = document.createElement("h1");
+  h1.textContent = title;
+  view.appendChild(h1);
+  for (const t of paras) { const p = document.createElement("p"); p.textContent = t; view.appendChild(p); }
+  document.title = title;
+  document.querySelector("main").hidden = true;
+  view.hidden = false;
+  $("#listenBack").hidden = false;
+}
+
 const savedText = store.get("ra-text");
 if (savedText) {
   ui.input.value = savedText;
