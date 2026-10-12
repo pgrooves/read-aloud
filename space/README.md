@@ -12,7 +12,7 @@ Only browser requests from the origins in `ALLOWED_ORIGINS` (default `https://pg
 In Cloud Shell (https://shell.cloud.google.com), with your project selected:
 
 ```
-git clone https://github.com/pgrooves/read-aloud.git && bash read-aloud/space/deploy-cloud-run.sh
+git clone https://github.com/pgrooves/read-aloud.git; bash read-aloud/space/deploy-cloud-run.sh
 ```
 
 To update after changing the server, run `cd ~/read-aloud && git pull && bash space/deploy-cloud-run.sh`.
