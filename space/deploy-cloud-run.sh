@@ -30,7 +30,7 @@ echo "Deploying to project: $PROJECT"
 
 # Cloud Run needs billing turned on (the free allowance still applies)
 if [ "$(gcloud billing projects describe "$PROJECT" --format='value(billingEnabled)' 2>/dev/null || true)" != "True" ]; then
-  ACCOUNT=$(gcloud billing accounts list --filter=open=true --format='value(name.basename())' | head -1)
+  ACCOUNT=$(gcloud billing accounts list --format='value(name.basename(),open)' 2>/dev/null | awk '$2 ~ /^[Tt]rue$/ {print $1; exit}')
   if [ -z "$ACCOUNT" ]; then
     echo "There's no billing account yet. Start the free trial at https://console.cloud.google.com/billing, then run this again."
     exit 1
