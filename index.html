@@ -58,7 +58,8 @@
   #reader { max-height: 55vh; overflow-y: auto; line-height: 1.7; }
   #reader:empty::before { content: "Your text will appear here. Tap any sentence to start reading from it."; color: var(--muted); }
   #reader p { margin: 0 0 1em; }
-  #reader span { cursor: pointer; border-radius: 4px; padding: 1px 0; }
+  #reader span { cursor: pointer; border-radius: 4px; padding: 1px 0; -webkit-tap-highlight-color: transparent; }
+  #reader span:active { background: color-mix(in srgb, var(--accent) 25%, transparent); }
   #reader span.done { color: var(--done); }
   #reader span.now { background: var(--hl); color: var(--hl-ink); }
   .speedval { min-width: 3ch; display: inline-block; }
@@ -178,7 +179,14 @@ function updateCount() {
   const words = t ? t.split(/\s+/).length : 0;
   ui.count.textContent = words ? `${words.toLocaleString()} words, about ${Math.max(1, Math.round(words / 160))} min` : "";
 }
-ui.input.addEventListener("input", () => { updateCount(); store.set("ra-text", ui.input.value); });
+// Show the text as tappable sentences shortly after pasting or typing
+let rebuildTimer = null;
+ui.input.addEventListener("input", () => {
+  updateCount();
+  store.set("ra-text", ui.input.value);
+  clearTimeout(rebuildTimer);
+  rebuildTimer = setTimeout(buildReader, 600);
+});
 ui.clear.onclick = () => { stopAll(); ui.input.value = ""; ui.reader.innerHTML = ""; builtFrom = null; updateCount(); store.set("ra-text", null); store.set("ra-pos", null); };
 
 ui.file.onchange = () => { if (ui.file.files[0]) loadFile(ui.file.files[0]); ui.file.value = ""; };
@@ -296,9 +304,11 @@ function buildReader() {
 }
 
 ui.reader.addEventListener("click", (e) => {
-  const i = e.target.dataset?.i;
-  if (i === undefined) return;
-  startFrom(+i);
+  const span = e.target.closest("span[data-i]");
+  if (!span) return;
+  clearTimeout(rebuildTimer);
+  buildReader(); // no-op unless the text changed since it was last shown
+  startFrom(+span.dataset.i);
 });
 
 function highlight(i) {
